@@ -133,7 +133,8 @@ class FFXEngine():
             log_stdout : bool = False,
             log_insn   : bool = False,
             log_time   : bool = True,
-            timeout    : int = 60):
+            timeout    : int = 60,
+            functions  : list = None):  # AG!!
         
         # set timeout (set timeout to 0 for no timeout)
         # saved in nanoseconds
@@ -204,6 +205,11 @@ class FFXEngine():
         # mode updated in callbacks
         self.cs = Cs(self.cs_arch, self.cpu_mode)
         self.cs.detail = 1 # enable detailed disassembly (slower)
+        
+        ## AG!!    
+        self.functions = functions if functions is not None else []
+        if self.functions: 
+            self.logger.info(f"Initialized FFXEngine with {len(self.functions)} pre-defined functions.")
 
         # map memory in unicorn emulator
         for region, kwargs in self.pd['mmap'].items():
@@ -1492,6 +1498,55 @@ class FFXEngine():
         self.process_time = 0
         self.process_start = perf_counter_ns() / 1000
 
+        ## AG!!
+        if self.functions:
+            self.logger.info(f"Adding {len(self.functions)} pre-defined functions to exploration queue.")
+            for addr, size, name in self.functions:
+                # Create a context for the function
+                context = self.backup() # Use the current state as a starting point
+                context.pc = addr | 1 if self.cs.mode & CS_MODE_THUMB else addr # Ensure correct mode bit if applicable
+                
+                # Add to callstack for proper function tracking
+                # For initial entry points, the return address can be None or a dummy value
+                call_stack_entry = CallStackEntry(
+                    fn_addr=context.pc,
+                    frame_ptr=self.uc.reg_read(UC_ARM_REG_SP), # Current SP
+                    ret_addr=None # No return address from an initial entry point
+                )
+                context.callstack.append(call_stack_entry)
+
+                # Create an FBranch object
+                # We'll treat these as initial "branches" to explore
+                branch_info = {
+                    'addr': addr,         # The address of the function
+                    'raw': b'',           # No raw bytes for a theoretical branch to a function start
+                    'target': context.pc, # The target is the function's entry point
+                    'bblock': None,       # No parent basic block for an initial entry point
+                    'context': context,
+                    'ret': None,          # No specific return for initial entry
+                    'isr': 0,             # Not an ISR in this context
+                }
+                # Check if this function address is already in the main entry/ISR lists
+                # or if it's already implicitly covered by existing vector table entries.
+                # Avoid adding duplicates if FFXE naturally finds it.
+                # However, for forced execution based on hints, we generally want to add it.
+                
+                # A simple check to avoid true duplicates if the address is already added by VT logic:
+                # This might need refinement if you have overlapping hints with VT entries
+                already_queued = False
+                for existing_branch in self.unexplored:
+                    if existing_branch.target == (addr | 1 if self.cs.mode & CS_MODE_THUMB else addr):
+                        already_queued = True
+                        break
+                
+                if not already_queued:
+                    # We use _queue_branch because it has logic to check for duplicates in unexplored
+                    # although in this specific case (initial seeding), direct append might also work.
+                    # _queue_branch also logs, which is helpful.
+                    self._queue_branch(FBranch(**branch_info))
+                    self.logger.info(f"Queued pre-defined function: {name} @ 0x{addr:x}")
+        
+        
         while self.unexplored:
             branch = self.unexplored.pop(-1)
             # try to cut down on memory usage

@@ -1,0 +1,38 @@
+FFXE Project - Instructions
+
+1. Prerequisites:
+   - Ensure you have the Conda environment for FFxE set up and all dependencies installed.
+  
+
+2. Navigate to the FFXE Project Folder:
+   - Open your Ubuntu (WSL) terminal (or similar prefered application).
+   - Change your current directory to the main FFXE project folder
+     cd ~/your_ffxe_project_folder/
+
+
+3. Activate Conda Environment:
+   - Activate the Conda environment where FFxE is installed.
+     conda activate ffxe
+
+
+4. Run FFxE Analysis (Generate .pkl files):
+
+    To run FFxE analysis WITHOUT hints
+     python -m test-unit.py 
+
+
+    To run FFxE analysis WITH hints
+     python -m test-unit.py --use-hints
+
+
+5. Visualize CFG
+
+    Run the visualization script:
+     python visualize_cfg.py
+
+    To run different binaries, open visualize_cfg.py in a text editor 
+     - At the top of the file, you will see lines like:
+       PKL_FILE_PATH = 'tests/cfgs/unit-tests/spi-o1-ffxe-cfg.pkl'
+       FUNCTIONS_FILE_PATH = 'spi00_functions.txt'
+     - change the path to your desired .pkl file and .bin file   
+     - Save the changes to visualize_cfg.py

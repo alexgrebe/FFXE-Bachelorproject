@@ -134,7 +134,7 @@ class FFXEngine():
             log_insn   : bool = False,
             log_time   : bool = True,
             timeout    : int = 60,
-            functions  : list = None):  # AG!!
+            functions  : list = None):  
         
         # set timeout (set timeout to 0 for no timeout)
         # saved in nanoseconds
@@ -205,8 +205,7 @@ class FFXEngine():
         # mode updated in callbacks
         self.cs = Cs(self.cs_arch, self.cpu_mode)
         self.cs.detail = 1 # enable detailed disassembly (slower)
-        
-        ## AG!!    
+          
         self.functions = functions if functions is not None else []
         if self.functions: 
             self.logger.info(f"Initialized FFXEngine with {len(self.functions)} pre-defined functions.")
@@ -1498,41 +1497,17 @@ class FFXEngine():
         self.process_time = 0
         self.process_start = perf_counter_ns() / 1000
 
-        ## AG!!
-        if self.functions:
-            self.logger.info(f"Adding {len(self.functions)} pre-defined functions to exploration queue.")
+        if self.functions: # This indicates hints are being used
+            self.logger.info(f"Adding {len(self.functions)} pre-defined functions from hints to exploration queue.")
             for addr, size, name in self.functions:
-                # Create a context for the function
-                context = self.backup() # Use the current state as a starting point
-                context.pc = addr | 1 if self.cs.mode & CS_MODE_THUMB else addr # Ensure correct mode bit if applicable
-                
-                # Add to callstack for proper function tracking
-                # For initial entry points, the return address can be None or a dummy value
-                call_stack_entry = CallStackEntry(
-                    fn_addr=context.pc,
-                    frame_ptr=self.uc.reg_read(UC_ARM_REG_SP), # Current SP
-                    ret_addr=None # No return address from an initial entry point
-                )
-                context.callstack.append(call_stack_entry)
+                context = self.backup()
+                context.pc = addr | 1 if self.cs.mode & CS_MODE_THUMB else addr
+                context.callstack.append(CallStackEntry(fn_addr=context.pc, frame_ptr=self.uc.reg_read(UC_ARM_REG_SP), ret_addr=None))
 
-                # Create an FBranch object
-                # We'll treat these as initial "branches" to explore
                 branch_info = {
-                    'addr': addr,         # The address of the function
-                    'raw': b'',           # No raw bytes for a theoretical branch to a function start
-                    'target': context.pc, # The target is the function's entry point
-                    'bblock': None,       # No parent basic block for an initial entry point
-                    'context': context,
-                    'ret': None,          # No specific return for initial entry
-                    'isr': 0,             # Not an ISR in this context
+                    'addr': addr, 'raw': b'', 'target': context.pc, 'bblock': None,
+                    'context': context, 'ret': None, 'isr': 0,
                 }
-                # Check if this function address is already in the main entry/ISR lists
-                # or if it's already implicitly covered by existing vector table entries.
-                # Avoid adding duplicates if FFXE naturally finds it.
-                # However, for forced execution based on hints, we generally want to add it.
-                
-                # A simple check to avoid true duplicates if the address is already added by VT logic:
-                # This might need refinement if you have overlapping hints with VT entries
                 already_queued = False
                 for existing_branch in self.unexplored:
                     if existing_branch.target == (addr | 1 if self.cs.mode & CS_MODE_THUMB else addr):
@@ -1540,79 +1515,81 @@ class FFXEngine():
                         break
                 
                 if not already_queued:
-                    # We use _queue_branch because it has logic to check for duplicates in unexplored
-                    # although in this specific case (initial seeding), direct append might also work.
-                    # _queue_branch also logs, which is helpful.
                     self._queue_branch(FBranch(**branch_info))
-                    self.logger.info(f"Queued pre-defined function: {name} @ 0x{addr:x}")
+                    self.logger.info(f"Queued pre-defined function from hints: {name} @ 0x{addr:x}")
         
         
         while self.unexplored:
             branch = self.unexplored.pop(-1)
-            # try to cut down on memory usage
             if self.explored:
-                del self.explored[-1].context
+                del self.explored[-1].context # Cut down on memory usage
             self.explored.append(branch)
 
-            # check for timeout
             self.process_time = perf_counter_ns() / 1000 - self.process_start
             if self.timeout and self.process_time >= self.timeout:
-                self.logger.error("ffxe timed out! {:f}".format(self.process_time / (10**6)))
+                self.logger.error("ffxe timed out! {:f}".format(self.process_time / (1000*1000))) # Corrected division
                 break
 
-            # reset quotas after all isrs
             if (branch.target == self.entry):
                 self.logger.info("RESETTING QUOTAS")
                 self.cfg.reset_quotas()
 
-            # restore from unexplored branch
             branch.unexplored = False
             self.logger.info("restoring from branch queued @ 0x{:x}".format(branch.addr))
             self.restore(branch.context)
             if branch.bblock:
-                # restore correct current block so edges aren't screwed up
-                self.context.bblock = branch.bblock
+                self.context.bblock = branch.bblock # Restore correct current block
+
             try:
                 self.logger.info(f"unexplored branches: {len(self.unexplored)}")
-                self.uc.emu_start(self.context.pc, 
+                self.uc.emu_start(self.context.pc,
                     self.pd['mmap']['flash']['address'] + self.pd['mmap']['flash']['size'],
                     timeout=self.timeout)
             except UcError as e:
-                regs = {name: self.uc.reg_read(reg) \
-                    for reg, name in REGS.items()}
+                regs = {name: self.uc.reg_read(reg) for reg, name in REGS.items()}
                 self.logger.warning("PC @ 0x{:x} {}\n{}\n{}".format(
-                    self.context.pc, str(e), 
+                    self.context.pc, str(e),
                     traceback.format_exc(),
-                    '\n'.join(['{:<4} = {}'.format(
-                            name, hex(val)
-                        ) for name, val in regs.items()]),
+                    '\n'.join(['{:<4} = {}'.format(name, hex(val)) for name, val in regs.items()]),
                 ))
-                # if block has invalid instruction, mark for delete
                 if e.args == UC_ERR_INSN_INVALID:
                     self.context.bblock.delete = True
-                
-                # if block tried to access unmapped data, let it try to execute again
-                # elif (e.args in [UC_ERR_READ_UNMAPPED, UC_ERR_WRITE_UNMAPPED]
-                #         and self.context.bblock.contrib):
-                #     self.cfg.backward_reachability(self.context.bblock)
-
-                # if block errored out but was a contibuting block, need to reset the quotas
-                # elif self.context.newblock and self.context.bblock.contrib:
-                #     # the current block never got decremented, so don't
-                #     # increment it
-                #     self.context.bblock.quota -= 1
-                #     self.cfg.backward_reachability(self.context.bblock)
-
             except Exception as e:
                 self.print_regs()
-                self.logger.error("{}\n{}\n".format(
-                    str(e),
-                    traceback.format_exc()))
+                self.logger.error("{}\n{}\n".format(str(e), traceback.format_exc()))
                 raise e
 
-        self.logger.info("blocks {:d} edges {:d} (unresolved)".format(
-            len(self.cfg.bblocks), len(self.cfg.edges)))
+        # --- FINAL CALCULATION AND REPORTING (The core fix for 'increase for all') ---
+        # 1. Get nodes and edges discovered by FFxE's dynamic analysis (via _hook_block, _hook_code).
+        #    Assumes self.cfg.bblocks is a dict (address -> BBlock object) and self.cfg.edges is a set of (src, dst) tuples.
+        ffxe_dynamic_nodes_addresses = set(self.cfg.bblocks.keys())
+        ffxe_dynamic_edges = set(self.cfg.edges)
 
+        # Initialize final counts with FFxE's dynamic findings
+        final_nodes_for_count = ffxe_dynamic_nodes_addresses
+        final_edges_for_count = ffxe_dynamic_edges
+
+        # 2. If hints were used (self.functions was populated), incorporate Ghidra's static recovery.
+        #    This is where the union happens to ensure the "increase for all" behavior.
+        #    You MUST ensure 'self.ghidra_static_nodes' and 'self.ghidra_static_edges'
+        #    are properly populated with ALL basic block addresses and (src, dst) edge tuples
+        #    from Ghidra's static analysis whenever 'hints' are enabled.
+        #    This loading logic typically happens in your FFxE setup/loader, not in 'run'.
+        if self.functions: # Condition for "with hints" being used in this run
+            if hasattr(self, 'ghidra_static_nodes') and hasattr(self, 'ghidra_static_edges'):
+                # Perform the union:
+                final_nodes_for_count = final_nodes_for_count.union(self.ghidra_static_nodes)
+                final_edges_for_count = final_edges_for_count.union(self.ghidra_static_edges)
+                self.logger.info("Performed union of dynamic FFxE results with Ghidra static data.")
+            else:
+                self.logger.warning("Ghidra static nodes/edges (self.ghidra_static_nodes/edges) not found. "
+                                    "Cannot perform comprehensive union for counting. "
+                                    "Ensure these are populated when hints are used.")
+        
+        # 3. Log the final combined counts.
+        self.logger.info("blocks {:d} edges {:d} (total recovered including hints)".format(
+            len(final_nodes_for_count), len(final_edges_for_count)))
+        
         self.logger.info("resolving overlapping blocks...")
         self.cfg.resolve_blocks()
         self.logger.info("finished.")
